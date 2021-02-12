@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CloudFormation Wordpress S3 RDS Lesson 8
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: Instance size. Default t2.micro.
+  AMI:
+    Type: String
+    Default: ami-0502e817a62226e03
+    Description: Ubuntu Server 20.04 LT
+  Key:
+    Type: String
+    Description: The key used to access the instance.
+  DatabaseName:
+    Default: dbwordpress
+    Description: Wordpress database name
+    Type: String
+    MinLength: "1"
+    MaxLength: "64"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+  DBUsername:
+    NoEcho: "true"
+    Description: Username for MySQL database access
+    Type: String
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: "true"
+    Description: Password MySQL database access
+    Type: String
+    MinLength: "8"
+    MaxLength: "41"
+    AllowedPattern: "(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])^([a-zA-Z0-9]{8,20})"
+    ConstraintDescription: Password must be between 8 and 32 characters, include
+      at least one digit, upper case letter and only contain acceptable
+      characters.
+
+Resources:
+  vpcwordpress:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref vpcwordpress
+      InternetGatewayId: !Ref InternetGateway
+
+  WebSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: eu-central-1a
+      VpcId: !Ref vpcwordpress
+      CidrBlock: 172.31.0.0/24
+      MapPublicIpOnLaunch: true
+
+  databasesubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      CidrBlock: 172.31.1.0/24
+      AvailabilityZone: eu-central-1a
+      VpcId: !Ref vpcwordpress
+  databasesubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      CidrBlock: 172.31.2.0/24
+      AvailabilityZone: eu-central-1b
+      VpcId: !Ref vpcwordpress      
+
+  DatabaseSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Subnets available for the RDS DB Instance
+      SubnetIds:
+        - !Ref databasesubnet1
+        - !Ref databasesubnet2
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref vpcwordpress
+
+  InternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTable
+
+  AssociationRtToPubSub:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref WebSubnet
+
+  httpwordpress:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow HTTP and SSH traffic"
+      VpcId: !Ref vpcwordpress
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  dbmysql:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow only db traffic"
+      VpcId: !Ref vpcwordpress
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "3306"
+          ToPort: "3306"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  dbwordpress:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DatabaseName
+      Engine: MySQL
+      EngineVersion: 8.0.20
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBInstanceClass: db.t2.micro
+      AllocatedStorage: 20
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - Ref: dbmysql
+    DeletionPolicy: Delete
+
+  s3wordpresshttpmysql:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: s3wordpress-http-mysql
+      AccessControl: PublicRead
+
+  webwordpress:
+    Type: AWS::EC2::Instance
+    DependsOn: dbwordpress
+    Properties:
+      SubnetId: !Ref WebSubnet
+      ImageId: !Ref AMI
+      InstanceType:
+        Ref: InstanceType
+      KeyName: !Ref Key
+      SecurityGroupIds:
+        - Ref: httpwordpress
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          sudo apt update -y
+          sudo apt upgrade -y
+          sudo apt install apache2 net-tools -y
+          sudo apt install php libapache2-mod-php php-mysql -y
+          sudo apt install php-curl php-gd php-mbstring php-xml php-xmlrpc php-soap php-intl php-zip -y
+          sudo systemctl restart apache2
+          sudo wget http://wordpress.org/latest.tar.gz
+          sudo tar -xzvf latest.tar.gz
+          sudo cp -r wordpress/* /var/www/html/
+          sudo chown -R www-data:www-data /var/www/html
+          sudo rm -f /var/www/html/index.html
+          sudo systemctl restart apache2
+          yum -y update
+          sudo yum install -y httpd
+          sudo systemctl start httpd
+
+Outputs:
+  FirstEC2InstanceId:
+    Description: "Instance Id of Wordpress server"
+    Value: !Ref webwordpress
+  RDSInstanceId:
+    Description: "Instance Id of Mysql Instance"
+    Value: !Ref dbwordpress
